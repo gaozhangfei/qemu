@@ -1991,7 +1991,7 @@ static void vfio_kvm_device_del_group(VFIOGroup *group)
 #endif
 }
 
-static VFIOAddressSpace *vfio_get_address_space(AddressSpace *as)
+VFIOAddressSpace *vfio_get_address_space(AddressSpace *as)
 {
     VFIOAddressSpace *space;
 
