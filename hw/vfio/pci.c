@@ -2760,7 +2760,8 @@ static void vfio_put_device(VFIOPCIDevice *vdev)
     g_free(vdev->vbasedev.name);
     g_free(vdev->msix);
 
-    vfio_put_base_device(&vdev->vbasedev);
+   // vfio_put_base_device(&vdev->vbasedev);
+    vfio_device_put_base(&vdev->vbasedev);
 }
 
 static void vfio_err_notifier_handler(void *opaque)
@@ -3127,8 +3128,8 @@ static void vfio_unregister_ext_irq_notifiers(VFIOPCIDevice *vdev)
 static void vfio_realize(PCIDevice *pdev, Error **errp)
 {
     VFIOPCIDevice *vdev = VFIO_PCI(pdev);
-    VFIODevice *vbasedev_iter;
-    VFIOGroup *group;
+  //  VFIODevice *vbasedev_iter;
+  //  VFIOGroup *group;
     char *tmp, *subsys, group_path[PATH_MAX], *group_name;
     Error *err = NULL;
     ssize_t len;
@@ -3181,7 +3182,7 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
     }
 
     trace_vfio_realize(vdev->vbasedev.name, groupid);
-
+/*
     group = vfio_get_group(groupid, pci_device_iommu_address_space(pdev), errp);
     if (!group) {
         goto error;
@@ -3194,6 +3195,7 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
             goto error;
         }
     }
+    */
 
     /*
      * Mediated devices *might* operate compatibly with discarding of RAM, but
@@ -3212,13 +3214,16 @@ static void vfio_realize(PCIDevice *pdev, Error **errp)
     if (vdev->vbasedev.ram_block_discard_allowed && !is_mdev) {
         error_setg(errp, "x-balloon-allowed only potentially compatible "
                    "with mdev devices");
-        vfio_put_group(group);
+        //vfio_put_group(group);
         goto error;
     }
 
-    ret = vfio_get_device(group, vdev->vbasedev.name, &vdev->vbasedev, errp);
+    printf("call vfio_device_get vdev->vbasedev.name=%s\n", vdev->vbasedev.name);
+
+//    ret = vfio_get_device(group, vdev->vbasedev.name, &vdev->vbasedev, errp);
+    ret = vfio_device_get(&vdev->vbasedev, groupid, pci_device_iommu_address_space(pdev), errp);
     if (ret) {
-        vfio_put_group(group);
+       // vfio_put_group(group);
         goto error;
     }
 
@@ -3460,7 +3465,7 @@ error:
 static void vfio_instance_finalize(Object *obj)
 {
     VFIOPCIDevice *vdev = VFIO_PCI(obj);
-    VFIOGroup *group = vdev->vbasedev.group;
+    //VFIOGroup *group = vdev->vbasedev.group;
 
     vfio_display_finalize(vdev);
     vfio_bars_finalize(vdev);
@@ -3476,7 +3481,7 @@ static void vfio_instance_finalize(Object *obj)
      * g_free(vdev->igd_opregion);
      */
     vfio_put_device(vdev);
-    vfio_put_group(group);
+    //vfio_put_group(group);
 }
 
 static void vfio_exitfn(PCIDevice *pdev)

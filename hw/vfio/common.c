@@ -2166,6 +2166,7 @@ static int vfio_connect_container(VFIOGroup *group, AddressSpace *as,
         iommu_mr = IOMMU_MEMORY_REGION(as->root);
         memory_region_iommu_get_attr(iommu_mr, IOMMU_ATTR_VFIO_NESTED,
                                      (void *)&nested);
+	printf("nested=%d\n", nested);
     }
 
     space = vfio_get_address_space(as);

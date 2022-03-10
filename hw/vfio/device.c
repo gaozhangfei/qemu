@@ -188,6 +188,8 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
     void *vaddr;
     int ret;
 
+    printf("gzf %s\n", __func__);
+
 //    trace_vfio_iommu_map_notify(iotlb->perm == IOMMU_NONE ? "UNMAP" : "MAP",
 //                                iova, iova + iotlb->addr_mask);
 
@@ -242,6 +244,7 @@ static void vfio_ram_discard_notify_discard(RamDiscardListener *rdl,
     const hwaddr size = int128_get64(section->size);
     const hwaddr iova = section->offset_within_address_space;
     int ret;
+    printf("gzf %s\n", __func__);
 
     /* Unmap with a single call. */
     ret = vfio_dma_unmap(vrdl->container, iova, size , NULL);
@@ -564,6 +567,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
     Int128 llend, llsize;
     int ret;
     bool try_unmap = true;
+    printf("gzf %s\n", __func__);
 
     if (vfio_listener_skipped_section(section)) {
 //        trace_vfio_listener_region_del_skip(
@@ -684,6 +688,7 @@ static void vfio_put_address_space(VFIOAddressSpace *space)
 
 static int vfio_ram_block_discard_disable(VFIOContainer *container, bool state)
 {
+    printf("container->iommu_type=%d\n", container->iommu_type);
     switch (container->iommu_type) {
     case VFIO_TYPE1v2_IOMMU:
     case VFIO_TYPE1_IOMMU:
@@ -863,6 +868,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     int ret, fd;
     uint32_t ioas, iova_pgsizes;
     VFIOAddressSpace *space;
+    printf("gzf %s\n", __func__);
 
     space = vfio_get_address_space(as);
 
@@ -925,6 +931,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     if (ret) {
         goto free_ioas_exit;
     }
+    printf("attach address ret=%d\n", ret);
 
     container = g_malloc0(sizeof(*container));
     container->space = space;
@@ -972,6 +979,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     }
 
     container->initialized = true;
+    printf("gzf %s done\n", __func__);
 
     return 0;
 listener_release_exit:
@@ -1051,6 +1059,7 @@ static bool vfio_group_find_device(VFIOGroup *group, VFIODevice *vbasedev)
 static VFIOGroup * vfio_device_get_group(VFIODevice *vbasedev, int groupid, AddressSpace *as, Error **errp)
 {
     VFIOGroup *group;
+    printf("gzf %s\n", __func__);
 
     QLIST_FOREACH(group, &vfio_group_list, next) {
         if (group->groupid == groupid) {
@@ -1070,6 +1079,7 @@ static VFIOGroup * vfio_device_get_group(VFIODevice *vbasedev, int groupid, Addr
             }
         }
     }
+    printf("gzf %s groupid=%d\n", __func__, groupid);
 
     group = g_malloc0(sizeof(*group));
 
@@ -1129,15 +1139,18 @@ int vfio_device_get(VFIODevice *vbasedev, int groupid, AddressSpace *as, Error *
     VFIOGroup *group;
     int ret, fd;
 
+/*
     printf("################### Test START #################\n");
     test_iommufd();
     printf("################### Test END #################\n\nn");
-
+*/
+    printf("gzf %s\n", __func__);
     fd = vfio_get_devicefd(vbasedev->sysfsdev, errp);
     if (fd < 0) {
         printf("%s no direct device open\n", __func__);
         return -1;
     }
+    printf("gzf %s fd=%d\n", __func__, fd);
 
     vbasedev->fd = fd;
 
@@ -1148,6 +1161,7 @@ int vfio_device_get(VFIODevice *vbasedev, int groupid, AddressSpace *as, Error *
         close(fd);
         return -1;
     }
+    printf("gzf %s group=%p\n", __func__, group);
 
     if (vfio_group_find_device(group, vbasedev)) {
         error_setg_errno(errp, errno, "error already attached device");
@@ -1158,6 +1172,7 @@ int vfio_device_get(VFIODevice *vbasedev, int groupid, AddressSpace *as, Error *
     }
 
     ret = ioctl(fd, VFIO_DEVICE_GET_INFO, &dev_info);
+    printf("GET_INFO ret=%d, fd=%d\n", ret, fd);
     if (ret) {
         error_setg_errno(errp, errno, "error getting device info");
         vfio_device_put_group(vbasedev, group);
