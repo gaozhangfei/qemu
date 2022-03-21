@@ -49,12 +49,14 @@ static int vfio_dma_unmap(VFIOContainer *container,
                           hwaddr iova, ram_addr_t size,
                           IOMMUTLBEntry *iotlb)
 {
+    printf("gzf %s\n", __func__);
     return iommufd_unmap_dma(container->iommufd, container->ioas, iova, size);
 }
 
 static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
                         ram_addr_t size, void *vaddr, bool readonly)
 {
+    printf("gzf %s\n", __func__);
     return iommufd_map_dma(container->iommufd, container->ioas, iova, size, vaddr, readonly);
 }
 
@@ -178,6 +180,78 @@ static bool vfio_get_xlat_addr(IOMMUTLBEntry *iotlb, void **vaddr,
     }
 
     return true;
+}
+
+/* Propagate a guest IOTLB invalidation to the host (nested mode) */
+static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
+{
+    VFIOGuestIOMMU *giommu = container_of(n, VFIOGuestIOMMU, n);
+    struct vfio_iommu_type1_cache_invalidate ustruct = {};
+    VFIOContainer *container = giommu->container;
+    int ret;
+
+    assert(iotlb->perm == IOMMU_NONE);
+
+    ustruct.argsz = sizeof(ustruct);
+    ustruct.flags = 0;
+    ustruct.info.argsz = sizeof(struct iommu_cache_invalidate_info);
+    ustruct.info.version = IOMMU_CACHE_INVALIDATE_INFO_VERSION_1;
+    ustruct.info.cache = IOMMU_CACHE_INV_TYPE_IOTLB;
+
+    switch (iotlb->granularity) {
+    case IOMMU_INV_GRAN_DOMAIN:
+        ustruct.info.granularity = IOMMU_INV_GRANU_DOMAIN;
+        break;
+    case IOMMU_INV_GRAN_PASID:
+    {
+        struct iommu_inv_pasid_info *pasid_info;
+        int archid = -1;
+
+        pasid_info = &ustruct.info.granu.pasid_info;
+        ustruct.info.granularity = IOMMU_INV_GRANU_PASID;
+        if (iotlb->flags & IOMMU_INV_FLAGS_ARCHID) {
+            pasid_info->flags |= IOMMU_INV_ADDR_FLAGS_ARCHID;
+            archid = iotlb->arch_id;
+        }
+        pasid_info->archid = archid;
+        trace_vfio_iommu_asid_inv_iotlb(archid);
+        break;
+    }
+    case IOMMU_INV_GRAN_ADDR:
+    {
+        hwaddr start = iotlb->iova + giommu->iommu_offset;
+        struct iommu_inv_addr_info *addr_info;
+        size_t size = iotlb->addr_mask + 1;
+        int archid = -1;
+
+        addr_info = &ustruct.info.granu.addr_info;
+        ustruct.info.granularity = IOMMU_INV_GRANU_ADDR;
+        if (iotlb->flags & IOMMU_INV_FLAGS_LEAF) {
+            addr_info->flags |= IOMMU_INV_ADDR_FLAGS_LEAF;
+        }
+        if (iotlb->flags & IOMMU_INV_FLAGS_ARCHID) {
+            addr_info->flags |= IOMMU_INV_ADDR_FLAGS_ARCHID;
+            archid = iotlb->arch_id;
+        }
+        if (iotlb->flags & IOMMU_INV_FLAGS_GRANULE) {
+            addr_info->granule_size = 1ULL << iotlb->granule;
+            addr_info->nb_granules = size >> iotlb->granule;
+        } else {
+            error_report_once("Guest does not use range invalidation support, upgrade it!");
+            return;
+        }
+        addr_info->archid = archid;
+        addr_info->addr = start;
+        trace_vfio_iommu_addr_inv_iotlb(archid, start, size,
+                                        1, iotlb->leaf);
+        break;
+    }
+    }
+
+    ret = ioctl(container->fd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
+    if (ret) {
+        error_report("%p: failed to invalidate CACHE (%d)", container, ret);
+    }
 }
 
 static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
@@ -384,7 +458,290 @@ static void vfio_unregister_ram_discard_listener(VFIOContainer *container,
     QLIST_REMOVE(vrdl, next);
     g_free(vrdl);
 }
+#if 1
+static VFIOHostDMAWindow *
+hostwin_from_range(VFIOContainer *container, hwaddr iova, hwaddr end)
+{
+    VFIOHostDMAWindow *hostwin;
 
+    QLIST_FOREACH(hostwin, &container->hostwin_list, hostwin_next) {
+        if (hostwin->min_iova <= iova && end <= hostwin->max_iova) {
+            return hostwin;
+        }
+    }
+    return NULL;
+}
+
+static int vfio_dma_map_ram_section(VFIOContainer *container,
+                                    MemoryRegionSection *section, Error **err)
+{
+    VFIOHostDMAWindow *hostwin;
+    Int128 llend, llsize;
+    hwaddr iova, end;
+    void *vaddr;
+    int ret;
+
+    assert(memory_region_is_ram(section->mr));
+
+    iova = TARGET_PAGE_ALIGN(section->offset_within_address_space);
+    llend = int128_make64(section->offset_within_address_space);
+    llend = int128_add(llend, section->size);
+    llend = int128_and(llend, int128_exts64(TARGET_PAGE_MASK));
+    end = int128_get64(int128_sub(llend, int128_one()));
+
+    /*
+     * For RAM memory regions with a RamDiscardManager, we only want to map the
+     * actually populated parts - and update the mapping whenever we're notified
+     * about changes.
+     */
+    if (memory_region_has_ram_discard_manager(section->mr)) {
+        vfio_register_ram_discard_listener(container, section);
+        return 0;
+    }
+
+    vaddr = memory_region_get_ram_ptr(section->mr) +
+            section->offset_within_region +
+            (iova - section->offset_within_address_space);
+
+    hostwin = hostwin_from_range(container, iova, end);
+    if (!hostwin) {
+        error_setg(err, "Container %p can't map guest IOVA region"
+                   " 0x%"HWADDR_PRIx"..0x%"HWADDR_PRIx, container, iova, end);
+        return -EFAULT;
+    }
+
+    trace_vfio_dma_map_ram(iova, end, vaddr);
+
+    llsize = int128_sub(llend, int128_make64(iova));
+
+    if (memory_region_is_ram_device(section->mr)) {
+        hwaddr pgmask = (1ULL << ctz64(hostwin->iova_pgsizes)) - 1;
+
+        if ((iova & pgmask) || (int128_get64(llsize) & pgmask)) {
+            trace_vfio_listener_region_add_no_dma_map(
+                memory_region_name(section->mr),
+                section->offset_within_address_space,
+                int128_getlo(section->size),
+                pgmask + 1);
+            return 0;
+        }
+    }
+
+    ret = vfio_dma_map(container, iova, int128_get64(llsize),
+                       vaddr, section->readonly);
+    if (ret) {
+        error_setg(err, "vfio_dma_map(%p, 0x%"HWADDR_PRIx", "
+                   "0x%"HWADDR_PRIx", %p) = %d (%m)",
+                   container, iova, int128_get64(llsize), vaddr, ret);
+        if (memory_region_is_ram_device(section->mr)) {
+            /* Allow unexpected mappings not to be fatal for RAM devices */
+            error_report_err(*err);
+            return 0;
+        }
+        return ret;
+    }
+    return 0;
+}
+
+static void vfio_listener_region_add(MemoryListener *listener,
+                                     MemoryRegionSection *section)
+{
+    VFIOContainer *container = container_of(listener, VFIOContainer, listener);
+    hwaddr iova, end;
+    Int128 llend;
+    int ret;
+    VFIOHostDMAWindow *hostwin;
+    Error *err = NULL;
+
+    printf("gzf %s\n", __func__);
+    if (vfio_listener_skipped_section(section)) {
+        trace_vfio_listener_region_add_skip(
+                section->offset_within_address_space,
+                section->offset_within_address_space +
+                int128_get64(int128_sub(section->size, int128_one())));
+        return;
+    }
+
+    if (unlikely((section->offset_within_address_space &
+                  ~qemu_real_host_page_mask) !=
+                 (section->offset_within_region & ~qemu_real_host_page_mask))) {
+        error_report("%s received unaligned region", __func__);
+        return;
+    }
+
+    iova = REAL_HOST_PAGE_ALIGN(section->offset_within_address_space);
+    llend = int128_make64(section->offset_within_address_space);
+    llend = int128_add(llend, section->size);
+    llend = int128_and(llend, int128_exts64(qemu_real_host_page_mask));
+
+    if (int128_ge(int128_make64(iova), llend)) {
+        return;
+    }
+    end = int128_get64(int128_sub(llend, int128_one()));
+
+    if (container->iommu_type == VFIO_SPAPR_TCE_v2_IOMMU) {
+        hwaddr pgsize = 0;
+
+        /* For now intersections are not allowed, we may relax this later */
+        QLIST_FOREACH(hostwin, &container->hostwin_list, hostwin_next) {
+            if (ranges_overlap(hostwin->min_iova,
+                               hostwin->max_iova - hostwin->min_iova + 1,
+                               section->offset_within_address_space,
+                               int128_get64(section->size))) {
+                error_setg(&err,
+                    "region [0x%"PRIx64",0x%"PRIx64"] overlaps with existing"
+                    "host DMA window [0x%"PRIx64",0x%"PRIx64"]",
+                    section->offset_within_address_space,
+                    section->offset_within_address_space +
+                        int128_get64(section->size) - 1,
+                    hostwin->min_iova, hostwin->max_iova);
+                goto fail;
+            }
+        }
+
+        ret = vfio_spapr_create_window(container, section, &pgsize);
+        if (ret) {
+            error_setg_errno(&err, -ret, "Failed to create SPAPR window");
+            goto fail;
+        }
+
+        vfio_host_win_add(container, section->offset_within_address_space,
+                          section->offset_within_address_space +
+                          int128_get64(section->size) - 1, pgsize);
+#if 0
+#ifdef CONFIG_KVM
+        if (kvm_enabled()) {
+            VFIOGroup *group;
+            IOMMUMemoryRegion *iommu_mr = IOMMU_MEMORY_REGION(section->mr);
+            struct kvm_vfio_spapr_tce param;
+            struct kvm_device_attr attr = {
+                .group = KVM_DEV_VFIO_GROUP,
+                .attr = KVM_DEV_VFIO_GROUP_SET_SPAPR_TCE,
+                .addr = (uint64_t)(unsigned long)&param,
+            };
+
+            if (!memory_region_iommu_get_attr(iommu_mr, IOMMU_ATTR_SPAPR_TCE_FD,
+                                              &param.tablefd)) {
+                QLIST_FOREACH(group, &container->group_list, container_next) {
+                    param.groupfd = group->fd;
+                    if (ioctl(vfio_kvm_device_fd, KVM_SET_DEVICE_ATTR, &attr)) {
+                        error_report("vfio: failed to setup fd %d "
+                                     "for a group with fd %d: %s",
+                                     param.tablefd, param.groupfd,
+                                     strerror(errno));
+                        return;
+                    }
+                    trace_vfio_spapr_group_attach(param.groupfd, param.tablefd);
+                }
+            }
+        }
+#endif
+#endif
+    }
+
+    hostwin = hostwin_from_range(container, iova, end);
+    if (!hostwin) {
+        error_setg(&err, "Container %p can't map guest IOVA region"
+                   " 0x%"HWADDR_PRIx"..0x%"HWADDR_PRIx, container, iova, end);
+        goto fail;
+    }
+
+    memory_region_ref(section->mr);
+
+    if (memory_region_is_iommu(section->mr)) {
+        IOMMUNotify notify;
+        VFIOGuestIOMMU *giommu;
+        IOMMUMemoryRegion *iommu_mr = IOMMU_MEMORY_REGION(section->mr);
+        int iommu_idx, flags;
+
+        trace_vfio_listener_region_add_iommu(iova, end);
+        /*
+         * FIXME: For VFIO iommu types which have KVM acceleration to
+         * avoid bouncing all map/unmaps through qemu this way, this
+         * would be the right place to wire that up (tell the KVM
+         * device emulation the VFIO iommu handles to use).
+         */
+        giommu = g_malloc0(sizeof(*giommu));
+        giommu->iommu = iommu_mr;
+        giommu->iommu_offset = section->offset_within_address_space -
+                               section->offset_within_region;
+        giommu->container = container;
+        llend = int128_add(int128_make64(section->offset_within_region),
+                           section->size);
+        llend = int128_sub(llend, int128_one());
+        iommu_idx = memory_region_iommu_attrs_to_index(iommu_mr,
+                                                       MEMTXATTRS_UNSPECIFIED);
+
+	if (container->iommu_type == VFIO_TYPE1_NESTING_IOMMU) {
+            /* IOTLB unmap notifier to propagate guest IOTLB invalidations */
+            flags = IOMMU_NOTIFIER_UNMAP;
+            notify = vfio_iommu_unmap_notify;
+        } else {
+            /* MAP/UNMAP IOTLB notifier */
+            flags = IOMMU_NOTIFIER_IOTLB_EVENTS;
+            notify = vfio_iommu_map_notify;
+        }
+        iommu_notifier_init(&giommu->n, notify, flags,
+                            section->offset_within_region,
+                            int128_get64(llend),
+                            iommu_idx);
+
+        ret = memory_region_iommu_set_page_size_mask(giommu->iommu,
+                                                     container->pgsizes,
+                                                     &err);
+        if (ret) {
+            g_free(giommu);
+            goto fail;
+        }
+
+        ret = memory_region_register_iommu_notifier(section->mr, &giommu->n,
+                                                    &err);
+        if (ret) {
+            g_free(giommu);
+            goto fail;
+        }
+        QLIST_INSERT_HEAD(&container->giommu_list, giommu, giommu_next);
+        if (flags & IOMMU_NOTIFIER_MAP) {
+            memory_region_iommu_replay(giommu->iommu, &giommu->n);
+        }
+
+        return;
+    }
+
+    /* Here we assume that memory_region_is_ram(section->mr)==true */
+
+    if (vfio_dma_map_ram_section(container, section, &err)) {
+        goto fail;
+    }
+
+    return;
+
+fail:
+    if (memory_region_is_ram_device(section->mr)) {
+        error_report("failed to vfio_dma_map. pci p2p may not work");
+        return;
+    }
+    /*
+     * On the initfn path, store the first error in the container so we
+     * can gracefully fail.  Runtime, there's not much we can do other
+     * than throw a hardware error.
+     */
+    if (!container->initialized) {
+        if (!container->error) {
+            error_propagate_prepend(&container->error, err,
+                                    "Region %s: ",
+                                    memory_region_name(section->mr));
+        } else {
+            error_free(err);
+        }
+    } else {
+        error_report_err(err);
+        hw_error("vfio: DMA mapping failed, unable to continue");
+    }
+}
+
+
+#else
 static void vfio_listener_region_add(MemoryListener *listener,
                                      MemoryRegionSection *section)
 {
@@ -396,12 +753,14 @@ static void vfio_listener_region_add(MemoryListener *listener,
     VFIOHostDMAWindow *hostwin;
     bool hostwin_found;
     Error *err = NULL;
+    printf("gzf %s\n", __func__);
 
     if (vfio_listener_skipped_section(section)) {
 //        trace_vfio_listener_region_add_skip(
 //                section->offset_within_address_space,
 //                section->offset_within_address_space +
 //                int128_get64(int128_sub(section->size, int128_one())));
+printf("return 1\n");
         return;
     }
 
@@ -433,6 +792,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     if (!hostwin_found) {
         error_setg(&err, "Container %p can't map guest IOVA region"
                    " 0x%"HWADDR_PRIx"..0x%"HWADDR_PRIx, container, iova, end);
+printf("return 2\n");
         goto fail;
     }
 
@@ -471,6 +831,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
                                                      &err);
         if (ret) {
             g_free(giommu);
+printf("return 3\n");
             goto fail;
         }
 
@@ -478,6 +839,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
                                                     &err);
         if (ret) {
             g_free(giommu);
+printf("return 4\n");
             goto fail;
         }
         QLIST_INSERT_HEAD(&container->giommu_list, giommu, giommu_next);
@@ -518,6 +880,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
             return;
         }
     }
+    printf("gzf %s call vfio_dma_map\n", __func__);
 
     ret = vfio_dma_map(container, iova, int128_get64(llsize),
                        vaddr, section->readonly);
@@ -536,6 +899,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     return;
 
 fail:
+    printf("gzf %s fail\n", __func__);
     if (memory_region_is_ram_device(section->mr)) {
         error_report("failed to vfio_dma_map. pci p2p may not work");
         return;
@@ -558,7 +922,7 @@ fail:
         hw_error("vfio: DMA mapping failed, unable to continue");
     }
 }
-
+#endif
 static void vfio_listener_region_del(MemoryListener *listener,
                                      MemoryRegionSection *section)
 {
@@ -868,7 +1232,16 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     int ret, fd;
     uint32_t ioas, iova_pgsizes;
     VFIOAddressSpace *space;
+    IOMMUMemoryRegion *iommu_mr;
+    bool nested = false;
     printf("gzf %s\n", __func__);
+    
+    if (memory_region_is_iommu(as->root)) {
+        iommu_mr = IOMMU_MEMORY_REGION(as->root);
+        memory_region_iommu_get_attr(iommu_mr, IOMMU_ATTR_VFIO_NESTED,
+                                     (void *)&nested);
+	printf("nested=%d\n", nested);
+    }
 
     space = vfio_get_address_space(as);
 
@@ -943,7 +1316,10 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     QLIST_INIT(&container->giommu_list);
     QLIST_INIT(&container->hostwin_list);
     QLIST_INIT(&container->vrdl_list);
-    container->iommu_type = VFIO_TYPE1v2_IOMMU;
+    if (nested)
+	container->iommu_type = VFIO_TYPE1_NESTING_IOMMU;
+    else
+        container->iommu_type = VFIO_TYPE1v2_IOMMU;
 
     ret = vfio_ram_block_discard_disable(container, true);
     if (ret) {
