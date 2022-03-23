@@ -124,7 +124,9 @@ int iommufd_map_dma(int iommufd, uint32_t ioas, hwaddr iova, ram_addr_t size, vo
     map.user_va = (int64_t)vaddr;
     map.iova = iova;
     map.length = size;
+    printf("gzf %s vaddr=%p, iova=%lx map.iova=%llx\n", __func__, vaddr, iova, map.iova);
     if (!readonly) {
+	    printf("!readonly\n");
         map.flags |= IOMMU_IOAS_PAGETABLE_MAP_WRITEABLE;
     }
 

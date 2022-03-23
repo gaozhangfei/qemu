@@ -55,11 +55,14 @@ static int test_dma(int iommufd, uint32_t ioas)
 	struct iommu_ioas_pagetable_unmap unmap;
 	int rt;
 
+	printf("gzf %s\n", __func__);
+
 	/* Test MAP */
 	memset(&map, 0x0, sizeof(map));
 	map.size = sizeof(map);
-	map.flags = IOMMU_IOAS_PAGETABLE_MAP_WRITEABLE |
-		    IOMMU_IOAS_PAGETABLE_MAP_READABLE;
+	//map.flags = IOMMU_IOAS_PAGETABLE_MAP_WRITEABLE |
+	//	    IOMMU_IOAS_PAGETABLE_MAP_READABLE;
+	map.flags = IOMMU_IOAS_PAGETABLE_MAP_READABLE;
 	map.ioas_id = ioas;
 
 	/* Allocate some space and setup a DMA mapping */

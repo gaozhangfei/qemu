@@ -49,14 +49,14 @@ static int vfio_dma_unmap(VFIOContainer *container,
                           hwaddr iova, ram_addr_t size,
                           IOMMUTLBEntry *iotlb)
 {
-    printf("gzf %s\n", __func__);
+    printf("gzf %s iova=%lx\n", __func__, iova);
     return iommufd_unmap_dma(container->iommufd, container->ioas, iova, size);
 }
 
 static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
                         ram_addr_t size, void *vaddr, bool readonly)
 {
-    printf("gzf %s\n", __func__);
+    printf("gzf %s vaddr=%p, iova=%lx\n", __func__, vaddr, iova);
     return iommufd_map_dma(container->iommufd, container->ioas, iova, size, vaddr, readonly);
 }
 
@@ -65,6 +65,7 @@ static void vfio_host_win_add(VFIOContainer *container,
                               uint64_t iova_pgsizes)
 {
     VFIOHostDMAWindow *hostwin;
+    printf("gzf %s\n", __func__);
 
     QLIST_FOREACH(hostwin, &container->hostwin_list, hostwin_next) {
         if (ranges_overlap(hostwin->min_iova,
@@ -181,7 +182,11 @@ static bool vfio_get_xlat_addr(IOMMUTLBEntry *iotlb, void **vaddr,
 
     return true;
 }
-
+static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
+{
+	return;
+}
+#if 0
 /* Propagate a guest IOTLB invalidation to the host (nested mode) */
 static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 {
@@ -253,7 +258,7 @@ static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
         error_report("%p: failed to invalidate CACHE (%d)", container, ret);
     }
 }
-
+#endif
 static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 {
     VFIOGuestIOMMU *giommu = container_of(n, VFIOGuestIOMMU, n);
@@ -503,6 +508,7 @@ static int vfio_dma_map_ram_section(VFIOContainer *container,
             section->offset_within_region +
             (iova - section->offset_within_address_space);
 
+    printf("gzf %s vaddr=%p\n", __func__, vaddr);
     hostwin = hostwin_from_range(container, iova, end);
     if (!hostwin) {
         error_setg(err, "Container %p can't map guest IOVA region"
@@ -526,7 +532,7 @@ static int vfio_dma_map_ram_section(VFIOContainer *container,
             return 0;
         }
     }
-
+printf("section->readonly=%d\n", section->readonly);
     ret = vfio_dma_map(container, iova, int128_get64(llsize),
                        vaddr, section->readonly);
     if (ret) {
@@ -542,6 +548,67 @@ static int vfio_dma_map_ram_section(VFIOContainer *container,
     }
     return 0;
 }
+
+static void vfio_dma_unmap_ram_section(VFIOContainer *container,
+                                       MemoryRegionSection *section)
+{
+    Int128 llend, llsize;
+    hwaddr iova, end;
+    bool try_unmap = true;
+    int ret;
+    printf("gzf %s\n", __func__);
+
+    iova = REAL_HOST_PAGE_ALIGN(section->offset_within_address_space);
+    llend = int128_make64(section->offset_within_address_space);
+    llend = int128_add(llend, section->size);
+    llend = int128_and(llend, int128_exts64(qemu_real_host_page_mask));
+
+    if (int128_ge(int128_make64(iova), llend)) {
+        return;
+    }
+    end = int128_get64(int128_sub(llend, int128_one()));
+
+    llsize = int128_sub(llend, int128_make64(iova));
+
+    trace_vfio_dma_unmap_ram(iova, end);
+
+    if (memory_region_is_ram_device(section->mr)) {
+        hwaddr pgmask;
+        VFIOHostDMAWindow *hostwin = hostwin_from_range(container, iova, end);
+
+        assert(hostwin); /* or region_add() would have failed */
+
+        pgmask = (1ULL << ctz64(hostwin->iova_pgsizes)) - 1;
+        try_unmap = !((iova & pgmask) || (int128_get64(llsize) & pgmask));
+    } else if (memory_region_has_ram_discard_manager(section->mr)) {
+	vfio_unregister_ram_discard_listener(container, section);
+        /* Unregistering will trigger an unmap. */
+        try_unmap = false;
+    }
+
+    if (try_unmap) {
+    printf(" try unmap gzf %s\n", __func__);
+        if (int128_eq(llsize, int128_2_64())) {
+            /* The unmap ioctl doesn't accept a full 64-bit span. */
+            llsize = int128_rshift(llsize, 1);
+            ret = vfio_dma_unmap(container, iova, int128_get64(llsize), NULL);
+            if (ret) {
+                error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
+                             "0x%"HWADDR_PRIx") = %d (%m)",
+                             container, iova, int128_get64(llsize), ret);
+            }
+            iova += int128_get64(llsize);
+        }
+    printf("gzf %s call unmap \n", __func__);
+        ret = vfio_dma_unmap(container, iova, int128_get64(llsize), NULL);
+        if (ret) {
+            error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
+                         "0x%"HWADDR_PRIx") = %d (%m)",
+                         container, iova, int128_get64(llsize), ret);
+        }
+    }
+}
+
 
 static void vfio_listener_region_add(MemoryListener *listener,
                                      MemoryRegionSection *section)
@@ -709,6 +776,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     }
 
     /* Here we assume that memory_region_is_ram(section->mr)==true */
+printf("gzf %s call map\n", __func__);
 
     if (vfio_dma_map_ram_section(container, section, &err)) {
         goto fail;
@@ -1010,6 +1078,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
         if (int128_eq(llsize, int128_2_64())) {
             /* The unmap ioctl doesn't accept a full 64-bit span. */
             llsize = int128_rshift(llsize, 1);
+    printf("gzf %s\n", __func__);
             ret = vfio_dma_unmap(container, iova, int128_get64(llsize), NULL);
             if (ret) {
                 error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
@@ -1018,6 +1087,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
             }
             iova += int128_get64(llsize);
         }
+    printf("gzf %s\n", __func__);
         ret = vfio_dma_unmap(container, iova, int128_get64(llsize), NULL);
         if (ret) {
             error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
@@ -1029,9 +1099,49 @@ static void vfio_listener_region_del(MemoryListener *listener,
     memory_region_unref(section->mr);
 }
 
+static void vfio_prereg_listener_region_add(MemoryListener *listener,
+                                            MemoryRegionSection *section)
+{
+    VFIOContainer *container =
+        container_of(listener, VFIOContainer, prereg_listener);
+    Error *err = NULL;
+   // printf("gzf %s\n", __func__);
+
+    if (!memory_region_is_ram(section->mr)) {
+        return;
+    }
+printf("gzf %s call map\n", __func__);
+
+    vfio_dma_map_ram_section(container, section, &err);
+    if (err) {
+
+	    printf("gzf %s map error\n", __func__);
+        error_report_err(err);
+    }
+}
+static void vfio_prereg_listener_region_del(MemoryListener *listener,
+                                     MemoryRegionSection *section)
+{
+    VFIOContainer *container =
+        container_of(listener, VFIOContainer, prereg_listener);
+  //  printf("gzf %s\n", __func__);
+
+    if (!memory_region_is_ram(section->mr)) {
+        return;
+    }
+printf("gzf %s call unmap\n", __func__);
+
+    vfio_dma_unmap_ram_section(container, section);
+}
+
 static const MemoryListener vfio_memory_listener = {
     .region_add = vfio_listener_region_add,
     .region_del = vfio_listener_region_del,
+};
+
+static MemoryListener vfio_memory_prereg_listener = {
+    .region_add = vfio_prereg_listener_region_add,
+    .region_del = vfio_prereg_listener_region_del,
 };
 
 static void vfio_listener_release(VFIOContainer *container)
@@ -1230,7 +1340,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
 {
     VFIOContainer *container;
     int ret, fd;
-    uint32_t ioas, iova_pgsizes;
+    uint32_t ioas;
     VFIOAddressSpace *space;
     IOMMUMemoryRegion *iommu_mr;
     bool nested = false;
@@ -1313,12 +1423,47 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
     container->error = NULL;
     container->dirty_pages_supported = false;
     container->dma_max_mappings = 0;
+
+    container->fd = vbasedev->fd;
+    printf("gzf container->fd=%d\n", container->fd);
     QLIST_INIT(&container->giommu_list);
     QLIST_INIT(&container->hostwin_list);
     QLIST_INIT(&container->vrdl_list);
-    if (nested)
+    if (nested) {
+
+        /*
+         * FIXME: This assumes that a Type1 IOMMU can map any 64-bit
+         * IOVA whatsoever.  That's not actually true, but the current
+         * kernel interface doesn't tell us what it can map, and the
+         * existing Type1 IOMMUs generally support any IOVA we're
+         * going to actually try in practice.
+         */
+        printf("gzf %s call host_win_add\n", __func__);
+	//vfio_host_win_add(container, 0, (hwaddr)-1, 1075843072);
+	vfio_host_win_add(container, 0, (hwaddr)-1, 4096);
+        //container->pgsizes = 1075843072;
+        container->pgsizes = 4096;
+
+        /* The default in the kernel ("dma_entry_limit") is 65535. */
+        container->dma_max_mappings = 65535;
+	printf("ret=%d\n", ret);
+	
 	container->iommu_type = VFIO_TYPE1_NESTING_IOMMU;
-    else
+
+            container->prereg_listener = vfio_memory_prereg_listener;
+	    // fixme: do we need prereg
+            //memory_listener_register(&container->prereg_listener,
+            //                         &address_space_memory);
+            if (container->error) {
+                memory_listener_unregister(&container->prereg_listener);
+                ret = -1;
+                error_propagate_prepend(errp, container->error,
+                                    "RAM memory listener initialization failed "
+                                    "for container");
+                goto free_container_exit;
+            }
+
+    } else
         container->iommu_type = VFIO_TYPE1v2_IOMMU;
 
     ret = vfio_ram_block_discard_disable(container, true);
@@ -1326,11 +1471,6 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
         error_setg_errno(errp, -ret, "Cannot set discarding of RAM broken");
         goto free_container_exit;
     }
-
-    /* Assume 4k IOVA page size */
-    iova_pgsizes = 4096;
-    vfio_host_win_add(container, 0, (hwaddr)-1, iova_pgsizes);
-    container->pgsizes = iova_pgsizes;
 
     /* The default in the kernel ("dma_entry_limit") is 65535. */
     container->dma_max_mappings = 65535;
@@ -1345,7 +1485,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
 
     container->listener = vfio_memory_listener;
 
-    memory_listener_register(&container->listener, container->space->as);
+    //memory_listener_register(&container->listener, container->space->as);
 
     if (container->error) {
         ret = -1;
@@ -1519,7 +1659,7 @@ int vfio_device_get(VFIODevice *vbasedev, int groupid, AddressSpace *as, Error *
     printf("################### Test START #################\n");
     test_iommufd();
     printf("################### Test END #################\n\nn");
-*/
+//*/
     printf("gzf %s\n", __func__);
     fd = vfio_get_devicefd(vbasedev->sysfsdev, errp);
     if (fd < 0) {
