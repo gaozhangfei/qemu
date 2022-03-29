@@ -2920,9 +2920,11 @@ static int vfio_iommu_cache_inv_type_pasid(PCIBus *bus, int32_t devfn,
     ustruct.info.cache = IOMMU_CACHE_INV_TYPE_PASID;
     ustruct.info.granularity = IOMMU_INV_GRANU_PASID;
 
+    printf("gzf %s\n", __func__);
+
     memcpy(pasid_info, &config->inv_pasid_info, sizeof(config->inv_pasid_info));
 
-    return ioctl(container->fd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
+    return ioctl(container->iommufd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
 }
 
 static int vfio_iommu_set_pasid_table(PCIBus *bus, int32_t devfn,
@@ -2933,11 +2935,14 @@ static int vfio_iommu_set_pasid_table(PCIBus *bus, int32_t devfn,
     VFIOContainer *container = vdev->vbasedev.group->container;
     struct vfio_iommu_type1_set_pasid_table info;
 
+    printf("gzf %s\n", __func__);
+
     info.argsz = sizeof(info);
     info.flags = VFIO_PASID_TABLE_FLAG_SET;
     memcpy(&info.config, &config->pasid_cfg, sizeof(config->pasid_cfg));
 
-    return ioctl(container->fd, VFIO_IOMMU_SET_PASID_TABLE, &info);
+    //return ioctl(container->fd, VFIO_IOMMU_SET_PASID_TABLE, &info);
+    return ioctl(container->iommufd, VFIO_IOMMU_SET_PASID_TABLE, &info);
 }
 
 static int vfio_iommu_return_page_response(PCIBus *bus, int32_t devfn,

@@ -182,11 +182,12 @@ static bool vfio_get_xlat_addr(IOMMUTLBEntry *iotlb, void **vaddr,
 
     return true;
 }
+#if 0
 static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 {
 	return;
 }
-#if 0
+#else
 /* Propagate a guest IOTLB invalidation to the host (nested mode) */
 static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 {
@@ -194,6 +195,7 @@ static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
     struct vfio_iommu_type1_cache_invalidate ustruct = {};
     VFIOContainer *container = giommu->container;
     int ret;
+
 
     assert(iotlb->perm == IOMMU_NONE);
 
@@ -253,7 +255,9 @@ static void vfio_iommu_unmap_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
     }
     }
 
-    ret = ioctl(container->fd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
+    printf("gzf %s iotlb->granularity=%d\n", __func__, iotlb->granularity);
+    //ret = ioctl(container->fd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
+    ret = ioctl(container->iommufd, VFIO_IOMMU_CACHE_INVALIDATE, &ustruct);
     if (ret) {
         error_report("%p: failed to invalidate CACHE (%d)", container, ret);
     }
@@ -740,6 +744,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
                                                        MEMTXATTRS_UNSPECIFIED);
 
 	if (container->iommu_type == VFIO_TYPE1_NESTING_IOMMU) {
+		printf("VFIO_TYPE1_NESTING_IOMMU unmap_notify\n");
             /* IOTLB unmap notifier to propagate guest IOTLB invalidations */
             flags = IOMMU_NOTIFIER_UNMAP;
             notify = vfio_iommu_unmap_notify;
@@ -1415,7 +1420,12 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
         goto free_ioas_exit;
     }
     printf("attach address ret=%d\n", ret);
-
+    
+    ret = iommufd_vfio_ioas(fd, ioas);
+    if (ret) {
+        goto free_ioas_exit;
+    }
+    
     container = g_malloc0(sizeof(*container));
     container->space = space;
     container->iommufd = fd;
@@ -1451,9 +1461,8 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
 	container->iommu_type = VFIO_TYPE1_NESTING_IOMMU;
 
             container->prereg_listener = vfio_memory_prereg_listener;
-	    // fixme: do we need prereg
-            //memory_listener_register(&container->prereg_listener,
-            //                         &address_space_memory);
+            memory_listener_register(&container->prereg_listener,
+                                     &address_space_memory);
             if (container->error) {
                 memory_listener_unregister(&container->prereg_listener);
                 ret = -1;
@@ -1485,7 +1494,7 @@ static int vfio_device_connect_container(VFIODevice *vbasedev, VFIOGroup *group,
 
     container->listener = vfio_memory_listener;
 
-    //memory_listener_register(&container->listener, container->space->as);
+    memory_listener_register(&container->listener, container->space->as);
 
     if (container->error) {
         ret = -1;

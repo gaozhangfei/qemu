@@ -41,6 +41,7 @@ int iommufd_get(void);
 void iommufd_put(int fd);
 int iommufd_alloc_ioas(int fd, uint32_t *ioas);
 void iommufd_free_ioas(int fd, uint32_t ioas);
+int iommufd_vfio_ioas(int fd, uint32_t ioas);
 int iommufd_unmap_dma(int iommufd, uint32_t ioas, hwaddr iova, ram_addr_t size);
 int iommufd_map_dma(int iommufd, uint32_t ioas, hwaddr iova, ram_addr_t size, void *vaddr, bool readonly);
 

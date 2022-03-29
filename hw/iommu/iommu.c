@@ -77,6 +77,27 @@ int iommufd_alloc_ioas(int fd, uint32_t *ioas)
     return ret;
 }
 
+int iommufd_vfio_ioas(int fd, uint32_t ioas)
+{
+    struct iommu_vfio_ioas ioas_data;
+    int ret;
+
+    if (fd < 0) {
+        return -EINVAL;
+    }
+
+    ioas_data.size = sizeof(ioas_data);
+    ioas_data.ioas_id = ioas;
+    ioas_data.op = IOMMU_VFIO_IOAS_SET;
+
+    ret = ioctl(fd, IOMMU_VFIO_IOAS, &ioas_data);
+    if (ret < 0) {
+        error_report("Failed to operate vfio ioas %m\n");
+    }
+
+    return ret;
+}
+
 void iommufd_free_ioas(int fd, uint32_t ioas)
 {
     struct iommu_destroy des;

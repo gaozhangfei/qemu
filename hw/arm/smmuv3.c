@@ -1001,6 +1001,7 @@ static void smmuv3_notify_config_change(SMMUState *bs, uint32_t sid)
     if (!mr) {
         return;
     }
+	printf("gzf %s\n", __func__);
 
     sdev = container_of(mr, SMMUDevice, iommu);
 
@@ -1037,6 +1038,7 @@ static void smmuv3_notify_config_change(SMMUState *bs, uint32_t sid)
     trace_smmuv3_notify_config_change(mr->parent_obj.name,
                                       iommu_config.pasid_cfg.config,
                                       iommu_config.pasid_cfg.base_ptr);
+    printf("gzf %s pci_device_set_pasid_table\n", __func__);
 
     if (pci_device_set_pasid_table(sdev->bus, sdev->devfn, &iommu_config)) {
         error_report("Failed to pass PASID table to host for iommu mr %s (%m)",

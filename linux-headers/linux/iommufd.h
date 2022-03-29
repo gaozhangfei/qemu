@@ -16,6 +16,7 @@ enum {
 	IOMMUFD_CMD_IOAS_PAGETABLE_MAP,
 	IOMMUFD_CMD_IOAS_PAGETABLE_COPY,
 	IOMMUFD_CMD_IOAS_PAGETABLE_UNMAP,
+	IOMMUFD_CMD_VFIO_IOAS,
 };
 
 /*
@@ -114,4 +115,15 @@ struct iommu_ioas_pagetable_unmap
 };
 #define IOMMU_IOAS_PAGETABLE_UNMAP                                             \
 	_IO(IOMMUFD_TYPE, IOMMUFD_CMD_IOAS_PAGETABLE_UNMAP)
+
+#define IOMMU_VFIO_IOAS_GET 0
+#define IOMMU_VFIO_IOAS_SET 1
+#define IOMMU_VFIO_IOAS_CLEAR 2
+struct iommu_vfio_ioas {
+	__u32 size;
+	__u32 ioas_id;
+	__u16 op;
+	__u16 reserved;
+};
+#define IOMMU_VFIO_IOAS _IO(IOMMUFD_TYPE, IOMMUFD_CMD_VFIO_IOAS)
 #endif
