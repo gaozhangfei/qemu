@@ -72,7 +72,7 @@ struct iommu_ioas_pagetable_map
 	__u32 size;
 #define IOMMU_IOAS_PAGETABLE_MAP_FIXED_IOVA (1 << 0)
 #define IOMMU_IOAS_PAGETABLE_MAP_WRITEABLE (1 << 1)
-#define IOMMU_IOAS_PAGETABLE_MAP_READABLE (1 << 1)
+#define IOMMU_IOAS_PAGETABLE_MAP_READABLE (1 << 2)
 	__u32 flags;
 	__u32 ioas_id;
 	__u32 __reserved;
