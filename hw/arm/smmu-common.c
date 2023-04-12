@@ -543,6 +543,8 @@ int smmu_iommu_install_nested_ste(SMMUState *s, SMMUDevice *sdev,
                                   uint32_t data_type, uint32_t data_len,
                                   void *data, IOHandler *handler)
 {
+    size_t page_size = qemu_real_host_page_size();
+    size_t mmap_size = 4 * 1024;
     SMMUHwpt *hwpt = sdev->hwpt;
     IOMMUFDDevice *idev;
     EventNotifier *n;
@@ -589,11 +591,22 @@ int smmu_iommu_install_nested_ste(SMMUState *s, SMMUDevice *sdev,
         goto free;
     }
 
+#if 0
+    hwpt->cmdq_page = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                           idev->iommufd, hwpt->hwpt_id * page_size);
+    if (hwpt->cmdq_page == MAP_FAILED) {
+        error_report("Unable to mmap for iommufd=%d: %s", idev->iommufd, strerror(errno));
+        goto free_hwpt;
+    }
+
+    hwpt->cmdq_page_size = mmap_size;
+#endif
+
     /* Detach the device first from its current hwpt */
     ret = iommufd_device_detach_hwpt(idev);
     if (ret) {
         error_report("Unable to attach dev to stage-1 HW pagetable: %d", ret);
-        goto free_hwpt;
+        goto out_munmap;
     }
 
     hwpt->eventfd = fd;
@@ -604,10 +617,12 @@ int smmu_iommu_install_nested_ste(SMMUState *s, SMMUDevice *sdev,
     ret = iommufd_device_attach_hwpt(idev, hwpt->hwpt_id);
     if (ret) {
         error_report("Unable to attach dev to stage-1 HW pagetable: %d", ret);
-        goto free_hwpt;
+        goto out_munmap;
     }
 
     return 0;
+out_munmap:
+    munmap(hwpt->cmdq_page, mmap_size);
 free_hwpt:
     iommufd_backend_free_id(hwpt->iommufd, hwpt->hwpt_id);
 free:

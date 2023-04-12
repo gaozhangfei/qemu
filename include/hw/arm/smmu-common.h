@@ -95,6 +95,8 @@ typedef struct SMMUHwpt {
     EventNotifier notifier;
     int fault_fd;
     uint32_t fault_tail_index;
+    void *cmdq_page;
+    uint32_t cmdq_page_size;
 } SMMUHwpt;
 
 typedef struct SMMUDevice {

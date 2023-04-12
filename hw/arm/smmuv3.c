@@ -873,6 +873,7 @@ static void smmuv3_notify_iova(IOMMUMemoryRegion *mr,
                                int asid, dma_addr_t iova,
                                uint8_t tg, uint64_t num_pages, bool leaf)
 {
+#if 0
     SMMUDevice *sdev = container_of(mr, SMMUDevice, iommu);
     struct iommu_hwpt_invalidate_arm_smmuv3 data = {
         .flags = leaf ? IOMMU_SMMUV3_CMDQ_TLBI_VA_LEAF : 0,
@@ -918,6 +919,7 @@ static void smmuv3_notify_iova(IOMMUMemoryRegion *mr,
     event.entry.data = &data;
 
     memory_region_notify_iommu_one(n, &event);
+#endif
 }
 
 /**
@@ -930,6 +932,7 @@ static void smmuv3_notify_iova(IOMMUMemoryRegion *mr,
 static void smmuv3_notify_asid(IOMMUMemoryRegion *mr,
                                IOMMUNotifier *n, int asid)
 {
+#if 0
     struct iommu_hwpt_invalidate_arm_smmuv3 data = {
         .opcode = SMMU_CMD_TLBI_NH_ASID,
         .asid = asid,
@@ -946,6 +949,7 @@ static void smmuv3_notify_asid(IOMMUMemoryRegion *mr,
     event.entry.data = &data;
 
     memory_region_notify_iommu_one(n, &event);
+#endif
 }
 
 
@@ -984,6 +988,7 @@ static void smmuv3_notify_cd_inv(SMMUState *bs, uint32_t sid, uint32_t ssid)
         return;
     }
 
+#if 0
     IOMMU_NOTIFIER_FOREACH(n, mr) {
         struct iommu_hwpt_invalidate_arm_smmuv3 data = {
             .opcode = SMMU_CMD_CFGI_CD,
@@ -1005,6 +1010,7 @@ static void smmuv3_notify_cd_inv(SMMUState *bs, uint32_t sid, uint32_t ssid)
             return;
         }
     }
+#endif
 #endif
 }
 
@@ -1055,6 +1061,7 @@ static void smmuv3_s1_range_inval(SMMUState *s, Cmd *cmd)
 /* Unmap the whole notifier's range */
 static void smmu_unmap_notifier_range(IOMMUNotifier *n)
 {
+#if 0
     struct iommu_hwpt_invalidate_arm_smmuv3 data = {
         .opcode = SMMU_CMD_TLBI_NH_ALL,
     };
@@ -1070,6 +1077,7 @@ static void smmu_unmap_notifier_range(IOMMUNotifier *n)
     event.entry.data = &data;
 
     memory_region_notify_iommu_one(n, &event);
+#endif
 }
 
 /* Unmap all notifiers attached to @mr */
@@ -1290,12 +1298,71 @@ static void smmuv3_notify_stall_resume(SMMUState *bs, uint32_t sid,
                           idev->dev_id, &page_resp);
 }
 
+static void __smmuv3_fill_tlbi_cmdq(SMMUDevice *sdev, Cmd *cmd, uint32_t *prod)
+{
+    uint32_t offset = *prod * sizeof(Cmd);
+    void *base = sdev->hwpt->cmdq_page;
+
+    if (!base)
+        return;
+    memcpy(base + offset, cmd, sizeof(Cmd));
+    *prod += 1;
+}
+
+static void smmuv3_fill_tlbi_cmdq(SMMUState *s, Cmd *cmd, uint32_t *prod)
+{
+    SMMUDevice *sdev;
+
+    QLIST_FOREACH(sdev, &s->devices_with_notifiers, next) {
+        if (!sdev->hwpt)
+            continue;
+        __smmuv3_fill_tlbi_cmdq(sdev, cmd, prod);
+    }
+}
+
+static int smmuv3_invalidate_cache_test(SMMUState *s, SMMUQueue *q, uint32_t *cons)
+{
+    hwaddr len = (hwaddr)q->entry_size * (1 << q->log2size);
+    struct iommu_hwpt_invalidate_arm_smmuv3 data = {
+        .cmdq_entry_size = q->entry_size,
+        .cmdq_log2size = q->log2size,
+        .cmdq_prod = Q_PROD(q),
+        .cmdq_cons = *cons,
+    };
+    SMMUDevice *sdev;
+    void *buf;
+    int ret;
+
+    buf = address_space_map(&address_space_memory, Q_BASE(q), &len,
+                            false, MEMTXATTRS_UNSPECIFIED);
+    if (!buf || !len)
+        return -ENOMEM;
+    data.cmdq_base = (uint64_t)buf;
+
+    QLIST_FOREACH(sdev, &s->devices_with_notifiers, next) {
+        if (!sdev->hwpt)
+            continue;
+        ret = smmu_iommu_invalidate_cache(sdev, IOMMU_HWPT_TYPE_ARM_SMMUV3,
+                                    sizeof(data), &data);
+        *cons = data.cmdq_cons;
+        if (ret || data.cmdq_prod != data.cmdq_cons) {
+            error_report("failed to invalidate TLB: ret=%d, prod=0x%x, cons=0x%x",
+                         ret, data.cmdq_prod, data.cmdq_cons);
+            return ret;
+        }
+    }
+    address_space_unmap(&address_space_memory, buf, len, false, 0);
+    return 0;
+}
+
 static int smmuv3_cmdq_consume(SMMUv3State *s)
 {
     SMMUState *bs = ARM_SMMU(s);
     SMMUCmdError cmd_error = SMMU_CERROR_NONE;
     SMMUQueue *q = &s->cmdq;
     SMMUCommandType type = 0;
+    uint32_t cons_save;
+    bool report = false;
 
     if (!smmuv3_cmdq_enabled(s)) {
         return 0;
@@ -1307,6 +1374,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
      * or old value.
      */
 
+    cons_save = Q_CONS(q);
     while (!smmuv3_q_empty(q)) {
         uint32_t pending = s->gerror ^ s->gerrorn;
         Cmd cmd;
@@ -1384,6 +1452,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
 
             trace_smmuv3_cmdq_cfgi_cd(sid);
             smmuv3_notify_cd_inv(bs, sid, ssid);
+            report = true;
             break;
         }
         case SMMU_CMD_TLBI_NH_ASID:
@@ -1392,6 +1461,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
 
             trace_smmuv3_cmdq_tlbi_nh_asid(asid);
             smmuv3_s1_asid_inval(bs, asid);
+            report = true;
             break;
         }
         case SMMU_CMD_TLBI_NH_ALL:
@@ -1399,10 +1469,15 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             trace_smmuv3_cmdq_tlbi_nh();
             smmu_inv_notifiers_all(&s->smmu_state);
             smmu_iotlb_inv_all(bs);
+            report = true;
             break;
         case SMMU_CMD_TLBI_NH_VAA:
         case SMMU_CMD_TLBI_NH_VA:
             smmuv3_s1_range_inval(bs, &cmd);
+            report = true;
+            break;
+        case SMMU_CMD_ATC_INV:
+            report = true;
             break;
         case SMMU_CMD_TLBI_EL3_ALL:
         case SMMU_CMD_TLBI_EL3_VA:
@@ -1412,7 +1487,6 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
         case SMMU_CMD_TLBI_EL2_VAA:
         case SMMU_CMD_TLBI_S12_VMALL:
         case SMMU_CMD_TLBI_S2_IPA:
-        case SMMU_CMD_ATC_INV:
         case SMMU_CMD_PRI_RESP:
         case SMMU_CMD_STALL_TERM:
             trace_smmuv3_unhandled_cmd(type);
@@ -1446,6 +1520,12 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
          * and does not check the completion of previous commands
          */
         queue_cons_incr(q);
+    }
+    if (bs->iommufd && report) {
+        q->cons = cons_save;
+        smmuv3_invalidate_cache_test(bs, q, &cons_save);
+        smmu_write_cmdq_err(s, cons_save >> 24);
+        q->cons = cons_save;
     }
 
     if (cmd_error) {
@@ -1952,10 +2032,14 @@ static int smmuv3_get_attr(IOMMUMemoryRegion *iommu,
 
 static int smmuv3_invalidate_cache(IOMMUMemoryRegion *iommu, void *cache_info)
 {
+#if 0
     SMMUDevice *sdev = container_of(iommu, SMMUDevice, iommu);
     IOMMUTLBEntry *iotlb = (IOMMUTLBEntry *)cache_info;
 
     return smmu_iommu_invalidate_cache(sdev, iotlb->data_type, iotlb->data_len, iotlb->data);
+#else
+    return 0;
+#endif
 }
 
 static void smmuv3_iommu_memory_region_class_init(ObjectClass *klass,
