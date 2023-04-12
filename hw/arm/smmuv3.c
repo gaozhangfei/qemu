@@ -977,7 +977,6 @@ static void smmuv3_notify_cd_inv(SMMUState *bs, uint32_t sid, uint32_t ssid)
 #ifdef __linux__
     IOMMUMemoryRegion *mr = smmu_iommu_mr(bs, sid);
     SMMUDevice *sdev;
-    IOMMUNotifier *n;
 
     sdev = container_of(mr, SMMUDevice, iommu);
 
@@ -989,6 +988,7 @@ static void smmuv3_notify_cd_inv(SMMUState *bs, uint32_t sid, uint32_t ssid)
     }
 
 #if 0
+    IOMMUNotifier *n;
     IOMMU_NOTIFIER_FOREACH(n, mr) {
         struct iommu_hwpt_invalidate_arm_smmuv3 data = {
             .opcode = SMMU_CMD_CFGI_CD,
@@ -1384,8 +1384,9 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
     SMMUCmdError cmd_error = SMMU_CERROR_NONE;
     SMMUQueue *q = &s->cmdq;
     SMMUCommandType type = 0;
-    uint32_t cons_save, prod = 0, cons = 0;
-    bool report = false;
+    uint32_t prod = 0, cons = 0;
+    //uint32_t cons_save, prod = 0, cons = 0;
+    //bool report = false;
 
     if (!smmuv3_cmdq_enabled(s)) {
         return 0;
@@ -1397,7 +1398,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
      * or old value.
      */
 
-    cons_save = Q_CONS(q);
+    //cons_save = Q_CONS(q);
     while (!smmuv3_q_empty(q)) {
         uint32_t pending = s->gerror ^ s->gerrorn;
         Cmd cmd;
@@ -1476,7 +1477,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             trace_smmuv3_cmdq_cfgi_cd(sid);
             smmuv3_notify_cd_inv(bs, sid, ssid);
             smmuv3_fill_tlbi_cmdq(bs, &cmd, &prod);
-            report = true;
+            //report = true;
             break;
         }
         case SMMU_CMD_TLBI_NH_ASID:
@@ -1486,7 +1487,7 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             trace_smmuv3_cmdq_tlbi_nh_asid(asid);
             smmuv3_s1_asid_inval(bs, asid);
             smmuv3_fill_tlbi_cmdq(bs, &cmd, &prod);
-            report = true;
+            //report = true;
             break;
         }
         case SMMU_CMD_TLBI_NH_ALL:
@@ -1495,17 +1496,17 @@ static int smmuv3_cmdq_consume(SMMUv3State *s)
             smmu_inv_notifiers_all(&s->smmu_state);
             smmu_iotlb_inv_all(bs);
             smmuv3_fill_tlbi_cmdq(bs, &cmd, &prod);
-            report = true;
+            //report = true;
             break;
         case SMMU_CMD_TLBI_NH_VAA:
         case SMMU_CMD_TLBI_NH_VA:
             smmuv3_s1_range_inval(bs, &cmd);
             smmuv3_fill_tlbi_cmdq(bs, &cmd, &prod);
-            report = true;
+            //report = true;
             break;
         case SMMU_CMD_ATC_INV:
             smmuv3_fill_tlbi_cmdq(bs, &cmd, &prod);
-            report = true;
+            //report = true;
             break;
         case SMMU_CMD_TLBI_EL3_ALL:
         case SMMU_CMD_TLBI_EL3_VA:
