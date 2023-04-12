@@ -77,6 +77,40 @@ int iommufd_device_get_info(IOMMUFDDevice *idev,
     return ret;
 }
 
+int iommufd_device_set_rid(IOMMUFDDevice *idev, uint32_t rid, uint32_t rid_base)
+{
+    struct iommufd_device_set_rid set_rid = {
+        .size = sizeof(set_rid),
+	.dev_id = idev->dev_id,
+	.rid = rid,
+	.rid_base = rid_base,
+    };
+    int ret;
+
+    ret = ioctl(idev->iommufd, IOMMU_DEVICE_SET_RID, &set_rid);
+    if (ret) {
+        error_report("Failed to set rid %d", ret);
+    }
+
+    return ret;
+}
+
+int iommufd_device_unset_rid(IOMMUFDDevice *idev)
+{
+    struct iommufd_device_unset_rid unset_rid = {
+        .size = sizeof(unset_rid),
+	.dev_id = idev->dev_id,
+    };
+    int ret;
+
+    ret = ioctl(idev->iommufd, IOMMU_DEVICE_UNSET_RID, &unset_rid);
+    if (ret) {
+        error_report("Failed to unset rid %d", ret);
+    }
+
+    return ret;
+}
+
 void iommufd_device_init(void *_idev, size_t instance_size,
                          const char *mrtypename, int fd,
                          uint32_t dev_id, uint32_t ioas_id,

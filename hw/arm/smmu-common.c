@@ -482,6 +482,7 @@ static int smmu_dev_set_iommu_device(PCIBus *bus, void *opaque,
 
     sdev->idev = idev;
 
+    iommufd_device_set_rid(idev, smmu_get_sid(sdev), 0);
     return 0;
 }
 
@@ -505,6 +506,7 @@ static void smmu_dev_unset_iommu_device(PCIBus *bus, void *opaque,
         return;
     }
 
+    iommufd_device_unset_rid(sdev->idev);
     sdev->idev = NULL;
 }
 
