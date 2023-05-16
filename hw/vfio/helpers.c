@@ -182,10 +182,12 @@ void vfio_region_write(void *opaque, hwaddr addr,
     }
 
     if (pwrite(vbasedev->fd, &buf, size, region->fd_offset + addr) != size) {
-        error_report("%s(%s:region%d+0x%"HWADDR_PRIx", 0x%"PRIx64
+        /*
+	error_report_err("%s(%s:region%d+0x%"HWADDR_PRIx", 0x%"PRIx64
                      ",%d) failed: %m",
                      __func__, vbasedev->name, region->nr,
                      addr, data, size);
+	*/
     }
 
     trace_vfio_region_write(vbasedev->name, region->nr, addr, data, size);
@@ -215,9 +217,11 @@ uint64_t vfio_region_read(void *opaque,
     uint64_t data = 0;
 
     if (pread(vbasedev->fd, &buf, size, region->fd_offset + addr) != size) {
-        error_report("%s(%s:region%d+0x%"HWADDR_PRIx", %d) failed: %m",
+        /*
+	error_report("%s(%s:region%d+0x%"HWADDR_PRIx", %d) failed: %m",
                      __func__, vbasedev->name, region->nr,
                      addr, size);
+	*/
         return (uint64_t)-1;
     }
     switch (size) {
