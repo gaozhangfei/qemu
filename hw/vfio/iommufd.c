@@ -608,6 +608,9 @@ found:
      */
     if (QLIST_EMPTY(&container->hwpt_list)) {
         vfio_as_del_container(space, bcontainer);
+        if (bcontainer->nested) {
+            memory_listener_unregister(& bcontainer->prereg_listener);
+        }
     }
     __vfio_device_detach_container(vbasedev, container, &err);
     if (err) {
